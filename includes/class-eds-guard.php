@@ -105,12 +105,18 @@ final class EDS_Guard {
 			if ( in_array( $action, array( 'elementor_ajax', 'heartbeat', 'query-attachments', 'eds_activity', 'wp-compression-test', 'get-attachment' ), true ) ) {
 				return;
 			}
+			if ( 'upload-attachment' === $action && self::demo_session() ) {
+				return; // images only, see EDS_Elementor::image_mimes()
+			}
 			wp_die( esc_html__( 'That action is disabled in the demo.', 'elementor-sandbox' ), '', array( 'response' => 403 ) );
 		}
 		$file = basename( (string) ( $_SERVER['PHP_SELF'] ?? '' ) ); // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
 		$page = isset( $_GET['page'] ) ? sanitize_key( wp_unslash( $_GET['page'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification
 		if ( 'admin.php' === $file && EDS_Admin::PAGE === $page ) {
 			return;
+		}
+		if ( 'async-upload.php' === $file && self::demo_session() ) {
+			return; // images for the workspace (types and size limited in EDS_Elementor)
 		}
 		if ( 'admin-post.php' === $file && isset( $_REQUEST['action'] ) && 'eds_reset' === $_REQUEST['action'] ) { // phpcs:ignore WordPress.Security.NonceVerification
 			return; // "Start over" (nonce checked by its handler)

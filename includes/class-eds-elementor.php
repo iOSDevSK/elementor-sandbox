@@ -81,6 +81,41 @@ final class EDS_Elementor {
 		add_filter( 'wpseo_sitemap_exclude_post_type', array( __CLASS__, 'exclude_type_bool' ), 10, 2 );
 		EDS_Context::on_start( array( __CLASS__, 'start' ) );
 		add_action( 'pre_get_posts', array( __CLASS__, 'hide_copies' ) );
+		add_action( 'template_redirect', array( __CLASS__, 'copies_only_in_workspace' ), -150 );
+		add_filter( 'ajax_query_attachments_args', array( __CLASS__, 'hide_media' ) );
+	}
+
+	/**
+	 * A workspace's page is shown only inside that workspace (its session or its
+	 * preview link): never by its own URL on the real site (?post_type=eds_page&p=…).
+	 */
+	public static function copies_only_in_workspace() {
+		$id = get_queried_object_id();
+		if ( ! $id || ! get_post_meta( $id, self::OWNED, true ) ) {
+			return;
+		}
+		if ( EDS_Context::id() && (int) get_post_meta( $id, self::WS, true ) === EDS_Context::id() ) {
+			return;
+		}
+		global $wp_query;
+		$wp_query->set_404();
+		status_header( 404 );
+		nocache_headers();
+	}
+
+	/** The media library shows the site's files and, in a workspace, its own uploads only. */
+	public static function hide_media( $args ) {
+		$meta   = isset( $args['meta_query'] ) ? (array) $args['meta_query'] : array();
+		$ws     = EDS_Context::id();
+		$meta[] = $ws
+			? array(
+				'relation' => 'OR',
+				array( 'key' => self::OWNED, 'compare' => 'NOT EXISTS' ),
+				array( 'key' => self::WS, 'value' => (string) $ws ),
+			)
+			: array( 'key' => self::OWNED, 'compare' => 'NOT EXISTS' );
+		$args['meta_query'] = $meta;
+		return $args;
 	}
 
 	/**
@@ -90,7 +125,7 @@ final class EDS_Elementor {
 	 */
 	public static function hide_copies( $q ) {
 		$types = (array) $q->get( 'post_type' );
-		if ( ! array_intersect( $types, array( 'elementor_library', 'any' ) ) || $q->get( 'eds_all' ) || $q->get( 'p' ) || $q->get( 'post__in' ) ) {
+		if ( ! array_intersect( $types, array( 'elementor_library', 'attachment', 'any' ) ) || $q->get( 'eds_all' ) || $q->get( 'p' ) || $q->get( 'post__in' ) ) {
 			return;
 		}
 		$meta   = (array) $q->get( 'meta_query' );
@@ -459,7 +494,10 @@ final class EDS_Elementor {
 		foreach ( $it as $f ) {
 			$f->isDir() ? @rmdir( $f->getPathname() ) : @unlink( $f->getPathname() ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions
 		}
-		@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions
+		clearstatcache();
+		if ( is_dir( $dir ) ) {
+			@rmdir( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors, WordPress.WP.AlternativeFunctions
+		}
 	}
 
 	// ------------------------------------------------------------ workspace requests
@@ -477,12 +515,17 @@ final class EDS_Elementor {
 			// revisions) is the workspace's and goes with it
 			add_action( 'wp_insert_post', array( __CLASS__, 'adopt' ), 1, 3 );
 			add_action( 'add_attachment', array( __CLASS__, 'adopt' ), 1 );
+			// SVG / JSON uploads are scripts on the real domain
+			add_filter( 'pre_option_elementor_unfiltered_files_upload', array( __CLASS__, 'zero' ) );
+			add_filter( 'upload_mimes', array( __CLASS__, 'image_mimes' ), 999 );
+			add_filter( 'upload_size_limit', array( __CLASS__, 'upload_limit' ), 999 );
 		}
 		// Elementor's CSS files and cache flags of this request are the workspace's own
 		self::scope_open( (int) $ws['id'] );
 		add_filter( 'pre_option_elementor_element_cache_ttl', array( __CLASS__, 'disable' ) );
 		// the front page and the pages of the site render as their copies
 		add_action( 'pre_get_posts', array( __CLASS__, 'swap_query' ), 1 );
+		add_filter( 'body_class', array( __CLASS__, 'body_class' ), 99 );
 		// never write Elementor's caches onto a document that is not the workspace's own
 		add_filter( 'update_post_metadata', array( __CLASS__, 'guard_cache_meta' ), 1, 5 );
 		add_filter( 'add_post_metadata', array( __CLASS__, 'guard_cache_meta_add' ), 1, 5 );
@@ -597,8 +640,15 @@ final class EDS_Elementor {
 		if ( array_key_exists( $name, self::$ws_opts ) ) {
 			return self::$ws_opts[ $name ];
 		}
-		// not yet in the workspace: its caches start invalid, never as the site's
-		return 0 === strpos( $name, 'elementor_atomic_cache_validity__' ) ? array( 'state' => false ) : $pre;
+		// not yet in the workspace: its caches and files start invalid / absent, never as
+		// the site's (whose files are in the site's folder, not the workspace's)
+		if ( 0 === strpos( $name, 'elementor_atomic_cache_validity__' ) ) {
+			return array( 'state' => false );
+		}
+		if ( in_array( $name, array( '_elementor_design_system_sync_css_meta', 'elementor-custom-breakpoints-files', '_elementor_global_css', '_elementor_element_cache_unique_id' ), true ) ) {
+			return array();
+		}
+		return $pre;
 	}
 
 	public static function ws_option_write( $value, $name, $old ) {
@@ -608,6 +658,46 @@ final class EDS_Elementor {
 		self::$ws_opts[ $name ] = $value;
 		update_option( self::opts_key( self::$scope ), self::$ws_opts, false );
 		return $old; // nothing to write to the site's option
+	}
+
+	/**
+	 * A page's copy renders with the classes of the page it copies (home, page,
+	 * page-id-<original>, page-template-…): the theme's CSS keys off them.
+	 */
+	public static function body_class( $classes ) {
+		$id   = (int) get_queried_object_id();
+		$orig = isset( array_flip( self::$map )[ $id ] ) ? (int) array_flip( self::$map )[ $id ] : ( isset( self::$map[ $id ] ) ? $id : 0 );
+		if ( ! $orig || 'page' !== get_post_type( $orig ) ) {
+			return $classes;
+		}
+		$out = array();
+		foreach ( $classes as $c ) {
+			if ( in_array( $c, array( 'single', 'home', 'page' ), true ) || preg_match( '/^(single-|postid-|page-id-)/', $c ) ) {
+				continue;
+			}
+			$out[] = preg_replace( '/^' . preg_quote( self::PT, '/' ) . '-template/', 'page-template', $c );
+		}
+		$out[] = 'page';
+		$out[] = 'page-id-' . $orig;
+		if ( (int) get_option( 'page_on_front' ) === $orig && 'page' === get_option( 'show_on_front' ) ) {
+			array_unshift( $out, 'home' );
+		}
+		return array_values( array_unique( $out ) );
+	}
+
+	public static function upload_limit( $bytes ) {
+		return min( (int) $bytes, 4 * MB_IN_BYTES );
+	}
+
+	public static function zero() {
+		return '0';
+	}
+
+	public static function image_mimes( $mimes ) {
+		return array_intersect_key(
+			$mimes,
+			array_flip( array( 'jpg|jpeg|jpe', 'png', 'gif', 'webp', 'avif' ) )
+		);
 	}
 
 	public static function active_kit() {

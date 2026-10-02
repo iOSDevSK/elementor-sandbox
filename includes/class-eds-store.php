@@ -79,8 +79,30 @@ final class EDS_Store {
 		return rtrim( strtr( base64_encode( random_bytes( 32 ) ), '+/', '-_' ), '=' );
 	}
 
-	private static function ip_hash() {
+	/**
+	 * The visitor's address. Behind a proxy on the same host or network (Traefik,
+	 * nginx, Docker) every request comes from the proxy: then the address the proxy
+	 * or Cloudflare passes on is used. A public REMOTE_ADDR is never overridden by a
+	 * header, so a client reaching the server directly cannot pick its own address.
+	 */
+	public static function client_ip() {
 		$ip = isset( $_SERVER['REMOTE_ADDR'] ) ? (string) $_SERVER['REMOTE_ADDR'] : ''; // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+		$behind_proxy = $ip && ! filter_var( $ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE );
+		if ( $behind_proxy ) {
+			foreach ( array( 'HTTP_CF_CONNECTING_IP', 'HTTP_X_REAL_IP', 'HTTP_X_FORWARDED_FOR' ) as $h ) {
+				$v = isset( $_SERVER[ $h ] ) ? trim( explode( ',', (string) $_SERVER[ $h ] )[0] ) : ''; // phpcs:ignore WordPress.Security.ValidatedSanitizedInput
+				if ( filter_var( $v, FILTER_VALIDATE_IP ) ) {
+					$ip = $v;
+					break;
+				}
+			}
+		}
+		/** the address the start limit counts (e.g. for another proxy setup) */
+		return (string) apply_filters( 'eds_client_ip', $ip );
+	}
+
+	private static function ip_hash() {
+		$ip = self::client_ip();
 		return '' === $ip ? '' : hash_hmac( 'sha256', $ip, wp_salt( 'nonce' ) . '|elementor-sandbox-ip' );
 	}
 

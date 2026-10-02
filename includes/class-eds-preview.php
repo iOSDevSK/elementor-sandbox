@@ -21,7 +21,17 @@ final class EDS_Preview {
 		if ( ! EDS_Context::ws() ) {
 			return;
 		}
+		// a page cache (Cache Enabler, WP Rocket, LiteSpeed, …) must never keep a
+		// workspace page: edits would not show and an expired link would not end
+		if ( ! defined( 'DONOTCACHEPAGE' ) ) {
+			define( 'DONOTCACHEPAGE', true );
+		}
+		add_filter( 'cache_enabler_bypass_cache', '__return_true' );
+		add_filter( 'autoptimize_filter_noptimize', '__return_true' );
 		add_filter( 'show_admin_bar', '__return_false' );
+		remove_action( 'wp_head', 'wp_shortlink_wp_head', 10 );
+		remove_action( 'template_redirect', 'wp_shortlink_header', 11 );
+		remove_action( 'wp_head', 'rel_canonical' );
 		remove_action( 'wp_head', 'rest_output_link_wp_head', 10 );
 		remove_action( 'wp_head', 'wp_oembed_add_discovery_links' );
 		header( 'X-Robots-Tag: noindex, nofollow, noarchive', true );
@@ -33,7 +43,10 @@ final class EDS_Preview {
 		add_filter( 'wp_robots', array( __CLASS__, 'robots' ), 99 );
 		header( 'Referrer-Policy: no-referrer', true );
 		header( 'Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()', true );
-		header( "Content-Security-Policy: sandbox allow-scripts allow-popups allow-top-navigation-by-user-activation; default-src 'self' https: data: blob:; script-src 'self' 'unsafe-inline' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' https: http: data: blob:; font-src 'self' https: data:; media-src 'self' https: http: data: blob:; connect-src 'none'; form-action 'none'; object-src 'none'; base-uri 'none'", true );
+		// no `sandbox`: it gives the page an opaque origin, and the theme's own fonts
+		// (same site) then fail CORS. The demo cannot add scripts (no unfiltered_html,
+		// no SVG uploads); what is locked is forms and requests to other sites.
+		header( "Content-Security-Policy: default-src 'self' https: data: blob:; script-src 'self' 'unsafe-inline' https: blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline' https:; img-src 'self' https: http: data: blob:; font-src 'self' https: data:; media-src 'self' https: http: data: blob:; connect-src 'self'; form-action 'none'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'", true );
 		ob_start( array( __CLASS__, 'rewrite_links' ) );
 	}
 
@@ -84,6 +97,10 @@ final class EDS_Preview {
 	}
 
 	private static function dead_link( $status ) {
+		if ( ! defined( 'DONOTCACHEPAGE' ) ) {
+			define( 'DONOTCACHEPAGE', true );
+		}
+		add_filter( 'cache_enabler_bypass_cache', '__return_true' );
 		status_header( $status );
 		nocache_headers();
 		header( 'X-Robots-Tag: noindex, nofollow, noarchive', true );
